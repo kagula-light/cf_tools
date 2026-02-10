@@ -1,0 +1,24 @@
+node_modules/
+dist/
+dist-electron/
+out/
+release/
+.idea/
+.vscode/
+*.log
+coverage/
+
+# Local AI/tooling workspaces
+.agent/
+.agents/
+.claude/
+.cursor/
+.junie/
+.kiro/
+.trae/
+.windsurf/
+
+# Local analysis artifacts / temporary office files
+skill_analysis_output*.txt
+~$*.csv
+*网络性能统计表*.csv
