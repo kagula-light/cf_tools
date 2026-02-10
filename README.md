@@ -50,15 +50,13 @@ npm run dist:win
 
 发布时需要环境变量：
 
-- `GH_OWNER`：GitHub 用户或组织
-- `GH_REPO`：仓库名
 - `GH_TOKEN`：具备 Releases 权限的 token
+
+> 当前项目已固定发布到 `kagula-light/cf_tools`，无需再设置 `GH_OWNER/GH_REPO`。
 
 示例（PowerShell）：
 
 ```powershell
-$env:GH_OWNER="your-org"
-$env:GH_REPO="your-repo"
 $env:GH_TOKEN="ghp_xxx"
 npm run dist:win
 ```
@@ -73,9 +71,6 @@ npm run dist:win
 
 - `Settings -> Secrets and variables -> Actions -> Secrets`
   - `GH_TOKEN`：可发布 Release 的 PAT（建议 classic token 勾选 `repo`）
-- `Settings -> Secrets and variables -> Actions -> Variables`
-  - `GH_OWNER`：仓库 owner（个人或组织）
-  - `GH_REPO`：仓库名
 
 本地发布流程示例：
 
