@@ -1,6 +1,6 @@
 {
   "name": "zcf-electron",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "5G CSV desktop analyzer",
   "main": "dist-electron/main/index.js",
   "author": "",
@@ -21,6 +21,7 @@
     "csv-stringify": "^6.5.2",
     "dayjs": "^1.11.13",
     "electron-updater": "^6.3.9",
+    "exceljs": "^4.4.0",
     "iconv-lite": "^0.6.3",
     "jschardet": "^3.1.4",
     "react": "^18.3.1",
@@ -41,6 +42,7 @@
   "build": {
     "appId": "com.zcf.csv-analyzer",
     "productName": "5G CSV Analyzer",
+    "artifactName": "${productName}-Setup-${version}.${ext}",
     "directories": {
       "output": "release"
     },
@@ -51,6 +53,7 @@
     ],
     "asar": true,
     "win": {
+      "signAndEditExecutable": false,
       "target": [
         {
           "target": "nsis",
@@ -60,11 +63,23 @@
         }
       ]
     },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "5G CSV Analyzer",
+      "runAfterFinish": true,
+      "installerSidebar": "build/installer-sidebar.bmp",
+      "uninstallerSidebar": "build/uninstaller-sidebar.bmp"
+    },
     "publish": [
       {
         "provider": "github",
         "owner": "kagula-light",
-        "repo": "cf_tools"
+        "repo": "cf_tools",
+        "releaseType": "release"
       }
     ]
   },

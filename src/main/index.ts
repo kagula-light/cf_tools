@@ -69,6 +69,13 @@ const registerUpdater = (): void => {
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
 
+  const runtimeToken = process.env.GH_TOKEN || process.env.GITHUB_TOKEN
+  if (runtimeToken) {
+    autoUpdater.requestHeaders = {
+      Authorization: `token ${runtimeToken}`
+    }
+  }
+
   autoUpdater.on('checking-for-update', () => {
     sendUpdaterStatus({ stage: 'checking', message: '正在检查更新...' })
   })
@@ -102,9 +109,18 @@ const registerUpdater = (): void => {
   })
 
   autoUpdater.on('error', (error) => {
+    const rawMessage = error.message
+    const looksLikeGithubAuth404 =
+      rawMessage.includes('/releases.atom') &&
+      rawMessage.includes('404')
+
+    const message = looksLikeGithubAuth404
+      ? '更新源不可访问（可能是私有仓库或未发布正式 Release）。请确认仓库可访问，且 Release 中包含 latest.yml 与安装包。'
+      : `更新失败: ${rawMessage}`
+
     sendUpdaterStatus({
       stage: 'error',
-      message: `更新失败: ${error.message}`
+      message
     })
   })
 }

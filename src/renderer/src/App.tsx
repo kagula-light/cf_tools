@@ -21,6 +21,38 @@ const hasElectronAPI = (): boolean => {
   return typeof window !== 'undefined' && typeof window.electronAPI !== 'undefined'
 }
 
+const ResultPreviewTable = ({ rows }: { rows: string[][] }): JSX.Element | null => {
+  if (!rows.length) {
+    return null
+  }
+
+  const header = rows[0] ?? []
+  const body = rows.slice(1)
+
+  return (
+    <div className="table-wrap result-wrap">
+      <table className="auto-fit-table">
+        <thead>
+          <tr>
+            {header.map((cell, index) => (
+              <th key={`result-head-${index}`}>{cell}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {body.map((row, rowIndex) => (
+            <tr key={`result-row-${rowIndex}`}>
+              {header.map((_, colIndex) => (
+                <td key={`result-cell-${rowIndex}-${colIndex}`}>{row[colIndex] ?? ''}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 export function App(): JSX.Element {
   const [filePath, setFilePath] = useState<string>('')
   const [validation, setValidation] = useState<ValidationResult | null>(null)
@@ -177,17 +209,17 @@ export function App(): JSX.Element {
     <div className="app">
       <header className="hero">
         <h1>5G CSV 日汇总分析器</h1>
-        <p>选择 CSV → 校验关键列 → 汇总并生成 -统计.csv</p>
+        <p>选择文件后自动校验并生成统计文件，支持结果预览与目录打开。</p>
       </header>
 
       <section className="card">
         <div className="row between">
           <div>
             <h2>1) 文件选择</h2>
-            <p className="hint">仅支持 CSV，自动识别编码与分隔符。</p>
+            <p className="hint">支持 CSV/XLSX，自动识别编码与分隔符。</p>
           </div>
           <button className="btn primary" onClick={onPickFile} disabled={busy}>
-            {busy ? '处理中...' : '选择 CSV 文件'}
+            {busy ? '处理中...' : '选择文件'}
           </button>
         </div>
 
@@ -226,9 +258,9 @@ export function App(): JSX.Element {
       <section className="card">
         <div className="row between">
           <div>
-            <h2>3) 预览前100行</h2>
+            <h2>3) 源文件预览</h2>
             <p className="hint">首行作为标题，以下展示前100行数据。</p>
-            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label className="hint checkbox-line">
               <input
                 type="checkbox"
                 checked={includeSheetStyleRows}
@@ -244,7 +276,7 @@ export function App(): JSX.Element {
         </div>
 
         <div className="table-wrap">
-          <table>
+          <table className="auto-fit-table">
             <thead>
               <tr>
                 {header.map((cell, index) => (
@@ -280,9 +312,15 @@ export function App(): JSX.Element {
           </div>
         </div>
 
-        <div className="field">
-          <label>输出文件</label>
-          <div className="value mono">{aggregationResult?.outputPath ?? '尚未生成'}</div>
+        <div className="grid two">
+          <div className="field">
+            <label>输出文件名</label>
+            <div className="value mono">{aggregationResult?.outputFileName ?? '尚未生成'}</div>
+          </div>
+          <div className="field">
+            <label>输出路径</label>
+            <div className="value mono">{aggregationResult?.outputPath ?? '尚未生成'}</div>
+          </div>
         </div>
 
         <div className="row">
@@ -305,6 +343,14 @@ export function App(): JSX.Element {
             ))}
           </div>
         ) : null}
+
+        {aggregationResult?.resultRows?.length ? (
+          <div className="result-section">
+            <h3>结果预览</h3>
+            <p className="hint">展示生成结果前200行，便于核对统计逻辑。</p>
+            <ResultPreviewTable rows={aggregationResult.resultRows} />
+          </div>
+        ) : null}
       </section>
 
       <section className="card">
@@ -325,3 +371,4 @@ export function App(): JSX.Element {
     </div>
   )
 }
+

@@ -8,6 +8,7 @@ import iconv from 'iconv-lite'
 import jschardet from 'jschardet'
 import dayjs from 'dayjs'
 import customParseFormat from 'dayjs/plugin/customParseFormat.js'
+import ExcelJS from 'exceljs'
 
 dayjs.extend(customParseFormat)
 
@@ -60,10 +61,11 @@ export interface AggregationRunResult {
   skippedRows: number
   invalidFieldStats: Record<string, number>
   outputPath?: string
+  outputFileName?: string
+  resultRows?: string[][]
   errorCode?:
     | 'FILE_NOT_FOUND'
     | 'MISSING_COLUMNS'
-    | 'OUTPUT_EXISTS'
     | 'PARSE_FAILED'
     | 'WRITE_FAILED'
     | 'UNKNOWN'
@@ -105,6 +107,8 @@ export interface AggBucket {
   interferenceSum: number
   interferenceCount: number
 }
+
+type OutputRow = Record<string, string>
 
 const DATE_PATTERNS = [
   'YYYY-MM-DD HH:mm:ss',
@@ -312,11 +316,52 @@ const getMissingColumns = (header: string[]): RequiredColumn[] => {
   return REQUIRED_COLUMNS.filter((column) => !set.has(normalizeHeader(column)))
 }
 
-const getOutputPath = (inputPath: string): string => {
+const getOutputBasePath = (inputPath: string): { dir: string; ext: string; fileName: string } => {
   const dir = dirname(inputPath)
-  const ext = extname(inputPath)
-  const fileName = basename(inputPath, ext)
-  return join(dir, `${fileName}-统计${ext || '.csv'}`)
+  const ext = extname(inputPath) || '.csv'
+  const fileName = basename(inputPath, extname(inputPath))
+  return { dir, ext, fileName }
+}
+
+const getOutputPath = (inputPath: string): string => {
+  const { dir, ext, fileName } = getOutputBasePath(inputPath)
+  return join(dir, `${fileName}-统计${ext}`)
+}
+
+const getNextAvailableOutputPath = (inputPath: string): string => {
+  const { dir, ext, fileName } = getOutputBasePath(inputPath)
+  const firstPath = join(dir, `${fileName}-统计${ext}`)
+  if (!existsSync(firstPath)) {
+    return firstPath
+  }
+
+  let index = 1
+  while (index < 10000) {
+    const candidate = join(dir, `${fileName}-统计(${index})${ext}`)
+    if (!existsSync(candidate)) {
+      return candidate
+    }
+    index += 1
+  }
+
+  return join(dir, `${fileName}-统计(${Date.now()})${ext}`)
+}
+
+const isXlsxPath = (filePath: string): boolean => {
+  return extname(filePath).toLowerCase() === '.xlsx'
+}
+
+const isDateLikeValue = (value: string): boolean => {
+  const day = parseDateToDay(value)
+  return Boolean(day)
+}
+
+const toPreviewRows = (rows: OutputRow[], maxRows = 200): string[][] => {
+  const header = [...OUTPUT_COLUMNS]
+  const body = rows.slice(0, maxRows).map((row) =>
+    OUTPUT_COLUMNS.map((column) => row[column] ?? '')
+  )
+  return [header, ...body]
 }
 
 export const previewAndValidateCsv = async (filePath: string): Promise<ValidationResult> => {
@@ -404,7 +449,7 @@ const mergeBucket = (target: AggBucket, source: AggBucket): void => {
   target.interferenceCount += source.interferenceCount
 }
 
-const toOutputRow = (item: AggBucket, dateValue?: string, networkValue?: string): Record<string, string> => {
+const toOutputRow = (item: AggBucket, dateValue?: string, networkValue?: string): OutputRow => {
   return {
     时间: dateValue ?? item.date,
     网络: networkValue ?? item.network,
@@ -419,6 +464,345 @@ const toOutputRow = (item: AggBucket, dateValue?: string, networkValue?: string)
     '5G切换成功率(%)': formatAverage(item.handoverRateSum, item.handoverRateCount),
     '5G上行平均干扰(dBm)': formatAverage(item.interferenceSum, item.interferenceCount)
   }
+}
+
+const applySheetLikeStyle = (worksheet: ExcelJS.Worksheet): void => {
+  worksheet.views = [{ state: 'frozen', ySplit: 1 }]
+
+  worksheet.columns = OUTPUT_COLUMNS.map((column, index) => {
+    if (index === 0) {
+      return { key: column, width: 13 }
+    }
+    if (index === 1) {
+      return { key: column, width: 10 }
+    }
+    if (index === 2) {
+      return { key: column, width: 33 }
+    }
+    return { key: column, width: 14 }
+  })
+
+  worksheet.eachRow((row, rowNumber) => {
+    row.alignment = { vertical: 'middle' }
+    row.font = { name: '宋体', size: 11 }
+    if (rowNumber === 1) {
+      row.font = { name: '宋体', size: 11, bold: true }
+      row.alignment = { vertical: 'middle', horizontal: 'left' }
+    }
+  })
+}
+
+const writeCsvFile = async (
+  outputPath: string,
+  outputRows: OutputRow[],
+  delimiter: string,
+  encoding: string
+): Promise<void> => {
+  await new Promise<void>((resolve, reject) => {
+    const writer = createWriteStream(outputPath)
+    const stringifier = stringify({
+      header: true,
+      columns: [...OUTPUT_COLUMNS],
+      delimiter
+    })
+
+    const targetEncoding = encoding.toLowerCase()
+    const shouldTranscode = targetEncoding !== 'utf-8' && targetEncoding !== 'utf8'
+    const transcoder = new Transform({
+      transform(chunk, _encoding, callback) {
+        try {
+          const textChunk = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8')
+          callback(null, iconv.encode(textChunk, targetEncoding))
+        } catch (error) {
+          callback(error as Error)
+        }
+      }
+    })
+
+    writer.on('finish', () => resolve())
+    writer.on('error', reject)
+    stringifier.on('error', reject)
+    transcoder.on('error', reject)
+
+    if (shouldTranscode) {
+      stringifier.pipe(transcoder).pipe(writer)
+    } else {
+      stringifier.pipe(writer)
+    }
+
+    for (const row of outputRows) {
+      stringifier.write(row)
+    }
+
+    stringifier.end()
+  })
+}
+
+const writeXlsxFile = async (outputPath: string, outputRows: OutputRow[]): Promise<void> => {
+  const workbook = new ExcelJS.Workbook()
+  const worksheet = workbook.addWorksheet('Sheet1')
+
+  worksheet.addRow([...OUTPUT_COLUMNS])
+  for (const row of outputRows) {
+    const values = OUTPUT_COLUMNS.map((column) => {
+      const value = row[column] ?? ''
+      if (!value) {
+        return ''
+      }
+      if (column === '时间') {
+        if (value === GRAND_TOTAL_LABEL) {
+          return value
+        }
+        if (isDateLikeValue(value)) {
+          return value
+        }
+      }
+      const asNumber = Number(value)
+      return Number.isFinite(asNumber) && value.trim() !== '' ? asNumber : value
+    })
+    worksheet.addRow(values)
+  }
+
+  applySheetLikeStyle(worksheet)
+
+  const dateColumnIndex = OUTPUT_COLUMNS.indexOf('时间') + 1
+  worksheet.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) {
+      return
+    }
+
+    const timeCell = row.getCell(dateColumnIndex)
+    const raw = String(timeCell.value ?? '')
+    if (raw && raw !== GRAND_TOTAL_LABEL && isDateLikeValue(raw)) {
+      const parsed = dayjs(raw)
+      if (parsed.isValid()) {
+        timeCell.value = parsed.toDate()
+        timeCell.numFmt = 'mm-dd-yy'
+      }
+    }
+  })
+
+  await workbook.xlsx.writeFile(outputPath)
+}
+
+const writeOutputFile = async (
+  sourcePath: string,
+  outputPath: string,
+  outputRows: OutputRow[],
+  delimiter: string,
+  encoding: string
+): Promise<void> => {
+  if (isXlsxPath(sourcePath)) {
+    await writeXlsxFile(outputPath, outputRows)
+    return
+  }
+
+  await writeCsvFile(outputPath, outputRows, delimiter, encoding)
+}
+
+const parseDataRows = async (
+  filePath: string,
+  preview: ValidationResult
+): Promise<{
+  buckets: Map<string, AggBucket>
+  processedRows: number
+  skippedRows: number
+  invalidFieldStats: Record<string, number>
+}> => {
+  const indexMap = new Map<string, number>()
+  const normalizedHeader = (preview.previewRows[0] ?? []).map(normalizeHeader)
+  normalizedHeader.forEach((col, idx) => indexMap.set(col, idx))
+
+  const colIndex = {
+    time: indexMap.get('时间') ?? -1,
+    network: indexMap.get('网络') ?? -1,
+    flow: indexMap.get('5G总流量(GB)') ?? -1,
+    maxUser: indexMap.get('5G最大用户数') ?? -1,
+    ulPrb: indexMap.get('5G上行PRB利用率(%)') ?? -1,
+    dlPrb: indexMap.get('5G下行PRB利用率(%)') ?? -1,
+    ulRate: indexMap.get('5G上行体验速率(Mbps)') ?? -1,
+    dlRate: indexMap.get('5G下行体验速率(Mbps)') ?? -1,
+    accessRate: indexMap.get('5G无线接通率(%)') ?? -1,
+    dropRate: indexMap.get('5G无线掉线率(%)') ?? -1,
+    handoverRate: indexMap.get('5G切换成功率(%)') ?? -1,
+    interference: indexMap.get('5G上行平均干扰(dBm)') ?? -1
+  }
+
+  const buckets = new Map<string, AggBucket>()
+  const invalidFieldStats: Record<string, number> = {
+    时间: 0,
+    网络: 0,
+    '5G总流量(GB)': 0,
+    '5G最大用户数': 0,
+    '5G上行PRB利用率(%)': 0,
+    '5G下行PRB利用率(%)': 0,
+    '5G上行体验速率(Mbps)': 0,
+    '5G下行体验速率(Mbps)': 0,
+    '5G无线接通率(%)': 0,
+    '5G无线掉线率(%)': 0,
+    '5G切换成功率(%)': 0,
+    '5G上行平均干扰(dBm)': 0
+  }
+
+  let processedRows = 0
+  let skippedRows = 0
+  let isHeader = true
+
+  await new Promise<void>((resolve, reject) => {
+    const fileStream = createReadStream(filePath)
+    const decoder = iconv.decodeStream(preview.encoding)
+    const parser = parse({
+      delimiter: preview.delimiter,
+      relax_quotes: true,
+      relax_column_count: true,
+      skip_empty_lines: true,
+      trim: false
+    })
+
+    parser.on('readable', () => {
+      let row: string[] | null
+      while ((row = parser.read()) !== null) {
+        if (isHeader) {
+          isHeader = false
+          continue
+        }
+
+        processedRows += 1
+
+        const timeRaw = row[colIndex.time] ?? ''
+        const networkRaw = (row[colIndex.network] ?? '').trim()
+        const day = parseDateToDay(timeRaw)
+
+        if (!day) {
+          invalidFieldStats['时间'] += 1
+          skippedRows += 1
+          continue
+        }
+
+        if (!networkRaw) {
+          invalidFieldStats['网络'] += 1
+          skippedRows += 1
+          continue
+        }
+
+        const key = `${day}__${networkRaw}`
+        const bucket = buckets.get(key) ?? createEmptyBucket(day, networkRaw)
+
+        const flow = parseNumeric(row[colIndex.flow])
+        if (flow === null) {
+          invalidFieldStats['5G总流量(GB)'] += 1
+        } else {
+          bucket.flowSum += flow
+        }
+
+        const maxUser = parseNumeric(row[colIndex.maxUser])
+        if (maxUser === null) {
+          invalidFieldStats['5G最大用户数'] += 1
+        } else {
+          bucket.maxUserSum += maxUser
+        }
+
+        if (!addAvgField(bucket, 'ulPrbSum', 'ulPrbCount', parseNumeric(row[colIndex.ulPrb]))) {
+          invalidFieldStats['5G上行PRB利用率(%)'] += 1
+        }
+        if (!addAvgField(bucket, 'dlPrbSum', 'dlPrbCount', parseNumeric(row[colIndex.dlPrb]))) {
+          invalidFieldStats['5G下行PRB利用率(%)'] += 1
+        }
+        if (!addAvgField(bucket, 'ulRateSum', 'ulRateCount', parseNumeric(row[colIndex.ulRate]))) {
+          invalidFieldStats['5G上行体验速率(Mbps)'] += 1
+        }
+        if (!addAvgField(bucket, 'dlRateSum', 'dlRateCount', parseNumeric(row[colIndex.dlRate]))) {
+          invalidFieldStats['5G下行体验速率(Mbps)'] += 1
+        }
+        if (!addAvgField(bucket, 'accessRateSum', 'accessRateCount', parseNumeric(row[colIndex.accessRate]))) {
+          invalidFieldStats['5G无线接通率(%)'] += 1
+        }
+        if (!addAvgField(bucket, 'dropRateSum', 'dropRateCount', parseNumeric(row[colIndex.dropRate]))) {
+          invalidFieldStats['5G无线掉线率(%)'] += 1
+        }
+        if (!addAvgField(bucket, 'handoverRateSum', 'handoverRateCount', parseNumeric(row[colIndex.handoverRate]))) {
+          invalidFieldStats['5G切换成功率(%)'] += 1
+        }
+        if (
+          !addAvgField(
+            bucket,
+            'interferenceSum',
+            'interferenceCount',
+            parseNumeric(row[colIndex.interference])
+          )
+        ) {
+          invalidFieldStats['5G上行平均干扰(dBm)'] += 1
+        }
+
+        buckets.set(key, bucket)
+      }
+    })
+
+    parser.on('end', () => resolve())
+    parser.on('error', (error) => reject(error))
+
+    fileStream.on('error', reject)
+    fileStream.pipe(decoder).pipe(parser)
+  })
+
+  return { buckets, processedRows, skippedRows, invalidFieldStats }
+}
+
+const buildOutputRows = (buckets: Map<string, AggBucket>, options?: AggregationOutputOptions): OutputRow[] => {
+  const sortedBuckets = [...buckets.values()].sort((a, b) => {
+    if (a.date === b.date) {
+      return a.network.localeCompare(b.network)
+    }
+    return a.date.localeCompare(b.date)
+  })
+
+  const includeDailySubtotalRows = Boolean(options?.includeDailySubtotalRows)
+  const includeGrandTotalRow = Boolean(options?.includeGrandTotalRow)
+  const blankDateForDetailRowsWhenSubtotalEnabled =
+    options?.blankDateForDetailRowsWhenSubtotalEnabled ?? true
+
+  const outputRows: OutputRow[] = []
+
+  if (!includeDailySubtotalRows) {
+    for (const item of sortedBuckets) {
+      outputRows.push(toOutputRow(item))
+    }
+  } else {
+    const byDate = new Map<string, AggBucket[]>()
+    for (const item of sortedBuckets) {
+      const list = byDate.get(item.date) ?? []
+      list.push(item)
+      byDate.set(item.date, list)
+    }
+
+    for (const [date, dateBuckets] of [...byDate.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const subtotal = createEmptyBucket(date, '')
+      for (const item of dateBuckets) {
+        mergeBucket(subtotal, item)
+      }
+      outputRows.push(toOutputRow(subtotal, date, ''))
+
+      for (const item of dateBuckets.sort((a, b) => a.network.localeCompare(b.network))) {
+        outputRows.push(
+          toOutputRow(
+            item,
+            blankDateForDetailRowsWhenSubtotalEnabled ? '' : date,
+            item.network
+          )
+        )
+      }
+    }
+  }
+
+  if (includeGrandTotalRow) {
+    const grand = createEmptyBucket('', '')
+    for (const item of sortedBuckets) {
+      mergeBucket(grand, item)
+    }
+    outputRows.push(toOutputRow(grand, GRAND_TOTAL_LABEL, ''))
+  }
+
+  return outputRows
 }
 
 export const runCsvAggregation = async (
@@ -450,246 +834,20 @@ export const runCsvAggregation = async (
       }
     }
 
-    const outputPath = getOutputPath(filePath)
-    if (existsSync(outputPath)) {
-      return {
-        success: false,
-        processedRows: 0,
-        skippedRows: 0,
-        invalidFieldStats: {},
-        errorCode: 'OUTPUT_EXISTS',
-        message: '输出文件已存在，请先处理重名文件。'
-      }
-    }
+    const { buckets, processedRows, skippedRows, invalidFieldStats } = await parseDataRows(filePath, preview)
+    const outputRows = buildOutputRows(buckets, options)
+    const outputPath = getNextAvailableOutputPath(filePath)
 
-    const indexMap = new Map<string, number>()
-    const normalizedHeader = (preview.previewRows[0] ?? []).map(normalizeHeader)
-    normalizedHeader.forEach((col, idx) => indexMap.set(col, idx))
-
-    const colIndex = {
-      time: indexMap.get('时间') ?? -1,
-      network: indexMap.get('网络') ?? -1,
-      flow: indexMap.get('5G总流量(GB)') ?? -1,
-      maxUser: indexMap.get('5G最大用户数') ?? -1,
-      ulPrb: indexMap.get('5G上行PRB利用率(%)') ?? -1,
-      dlPrb: indexMap.get('5G下行PRB利用率(%)') ?? -1,
-      ulRate: indexMap.get('5G上行体验速率(Mbps)') ?? -1,
-      dlRate: indexMap.get('5G下行体验速率(Mbps)') ?? -1,
-      accessRate: indexMap.get('5G无线接通率(%)') ?? -1,
-      dropRate: indexMap.get('5G无线掉线率(%)') ?? -1,
-      handoverRate: indexMap.get('5G切换成功率(%)') ?? -1,
-      interference: indexMap.get('5G上行平均干扰(dBm)') ?? -1
-    }
-
-    const buckets = new Map<string, AggBucket>()
-    const invalidFieldStats: Record<string, number> = {
-      时间: 0,
-      网络: 0,
-      '5G总流量(GB)': 0,
-      '5G最大用户数': 0,
-      '5G上行PRB利用率(%)': 0,
-      '5G下行PRB利用率(%)': 0,
-      '5G上行体验速率(Mbps)': 0,
-      '5G下行体验速率(Mbps)': 0,
-      '5G无线接通率(%)': 0,
-      '5G无线掉线率(%)': 0,
-      '5G切换成功率(%)': 0,
-      '5G上行平均干扰(dBm)': 0
-    }
-
-    let processedRows = 0
-    let skippedRows = 0
-    let isHeader = true
-
-    await new Promise<void>((resolve, reject) => {
-      const fileStream = createReadStream(filePath)
-      const decoder = iconv.decodeStream(preview.encoding)
-      const parser = parse({
-        delimiter: preview.delimiter,
-        relax_quotes: true,
-        relax_column_count: true,
-        skip_empty_lines: true,
-        trim: false
-      })
-
-      parser.on('readable', () => {
-        let row: string[] | null
-        while ((row = parser.read()) !== null) {
-          if (isHeader) {
-            isHeader = false
-            continue
-          }
-
-          processedRows += 1
-
-          const timeRaw = row[colIndex.time] ?? ''
-          const networkRaw = (row[colIndex.network] ?? '').trim()
-          const day = parseDateToDay(timeRaw)
-
-          if (!day) {
-            invalidFieldStats['时间'] += 1
-            skippedRows += 1
-            continue
-          }
-
-          if (!networkRaw) {
-            invalidFieldStats['网络'] += 1
-            skippedRows += 1
-            continue
-          }
-
-          const key = `${day}__${networkRaw}`
-          const bucket = buckets.get(key) ?? createEmptyBucket(day, networkRaw)
-
-          const flow = parseNumeric(row[colIndex.flow])
-          if (flow === null) {
-            invalidFieldStats['5G总流量(GB)'] += 1
-          } else {
-            bucket.flowSum += flow
-          }
-
-          const maxUser = parseNumeric(row[colIndex.maxUser])
-          if (maxUser === null) {
-            invalidFieldStats['5G最大用户数'] += 1
-          } else {
-            bucket.maxUserSum += maxUser
-          }
-
-          if (!addAvgField(bucket, 'ulPrbSum', 'ulPrbCount', parseNumeric(row[colIndex.ulPrb]))) {
-            invalidFieldStats['5G上行PRB利用率(%)'] += 1
-          }
-          if (!addAvgField(bucket, 'dlPrbSum', 'dlPrbCount', parseNumeric(row[colIndex.dlPrb]))) {
-            invalidFieldStats['5G下行PRB利用率(%)'] += 1
-          }
-          if (!addAvgField(bucket, 'ulRateSum', 'ulRateCount', parseNumeric(row[colIndex.ulRate]))) {
-            invalidFieldStats['5G上行体验速率(Mbps)'] += 1
-          }
-          if (!addAvgField(bucket, 'dlRateSum', 'dlRateCount', parseNumeric(row[colIndex.dlRate]))) {
-            invalidFieldStats['5G下行体验速率(Mbps)'] += 1
-          }
-          if (!addAvgField(bucket, 'accessRateSum', 'accessRateCount', parseNumeric(row[colIndex.accessRate]))) {
-            invalidFieldStats['5G无线接通率(%)'] += 1
-          }
-          if (!addAvgField(bucket, 'dropRateSum', 'dropRateCount', parseNumeric(row[colIndex.dropRate]))) {
-            invalidFieldStats['5G无线掉线率(%)'] += 1
-          }
-          if (!addAvgField(bucket, 'handoverRateSum', 'handoverRateCount', parseNumeric(row[colIndex.handoverRate]))) {
-            invalidFieldStats['5G切换成功率(%)'] += 1
-          }
-          if (!addAvgField(bucket, 'interferenceSum', 'interferenceCount', parseNumeric(row[colIndex.interference]))) {
-            invalidFieldStats['5G上行平均干扰(dBm)'] += 1
-          }
-
-          buckets.set(key, bucket)
-        }
-      })
-
-      parser.on('end', () => resolve())
-      parser.on('error', (error) => reject(error))
-
-      fileStream.on('error', reject)
-
-      fileStream.pipe(decoder).pipe(parser)
-    })
-
-    const sortedBuckets = [...buckets.values()].sort((a, b) => {
-      if (a.date === b.date) {
-        return a.network.localeCompare(b.network)
-      }
-      return a.date.localeCompare(b.date)
-    })
-
-    const includeDailySubtotalRows = Boolean(options?.includeDailySubtotalRows)
-    const includeGrandTotalRow = Boolean(options?.includeGrandTotalRow)
-    const blankDateForDetailRowsWhenSubtotalEnabled =
-      options?.blankDateForDetailRowsWhenSubtotalEnabled ?? true
-
-    const outputRows: Array<Record<string, string>> = []
-
-    if (!includeDailySubtotalRows) {
-      for (const item of sortedBuckets) {
-        outputRows.push(toOutputRow(item))
-      }
-    } else {
-      const byDate = new Map<string, AggBucket[]>()
-      for (const item of sortedBuckets) {
-        const list = byDate.get(item.date) ?? []
-        list.push(item)
-        byDate.set(item.date, list)
-      }
-
-      for (const [date, dateBuckets] of [...byDate.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-        const subtotal = createEmptyBucket(date, '')
-        for (const item of dateBuckets) {
-          mergeBucket(subtotal, item)
-        }
-        outputRows.push(toOutputRow(subtotal, date, ''))
-
-        for (const item of dateBuckets.sort((a, b) => a.network.localeCompare(b.network))) {
-          outputRows.push(
-            toOutputRow(
-              item,
-              blankDateForDetailRowsWhenSubtotalEnabled ? '' : date,
-              item.network
-            )
-          )
-        }
-      }
-    }
-
-    if (includeGrandTotalRow) {
-      const grand = createEmptyBucket('', '')
-      for (const item of sortedBuckets) {
-        mergeBucket(grand, item)
-      }
-      outputRows.push(toOutputRow(grand, GRAND_TOTAL_LABEL, ''))
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      const writer = createWriteStream(outputPath)
-      const stringifier = stringify({
-        header: true,
-        columns: [...OUTPUT_COLUMNS],
-        delimiter: preview.delimiter
-      })
-
-      const targetEncoding = preview.encoding.toLowerCase()
-      const shouldTranscode = targetEncoding !== 'utf-8' && targetEncoding !== 'utf8'
-      const transcoder = new Transform({
-        transform(chunk, _encoding, callback) {
-          try {
-            const textChunk = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8')
-            callback(null, iconv.encode(textChunk, targetEncoding))
-          } catch (error) {
-            callback(error as Error)
-          }
-        }
-      })
-
-      writer.on('finish', () => resolve())
-      writer.on('error', reject)
-      stringifier.on('error', reject)
-      transcoder.on('error', reject)
-
-      if (shouldTranscode) {
-        stringifier.pipe(transcoder).pipe(writer)
-      } else {
-        stringifier.pipe(writer)
-      }
-
-      for (const row of outputRows) {
-        stringifier.write(row)
-      }
-
-      stringifier.end()
-    })
+    await writeOutputFile(filePath, outputPath, outputRows, preview.delimiter, preview.encoding)
 
     return {
       success: true,
       outputPath,
+      outputFileName: basename(outputPath),
       processedRows,
       skippedRows,
-      invalidFieldStats
+      invalidFieldStats,
+      resultRows: toPreviewRows(outputRows)
     }
   } catch (error) {
     return {
@@ -711,5 +869,7 @@ export const __internal__ = {
   formatNumber,
   formatAverage,
   getMissingColumns,
-  getOutputPath
+  getOutputPath,
+  getNextAvailableOutputPath
 }
+

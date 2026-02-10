@@ -28,10 +28,11 @@ export interface AggregationRunResult {
   skippedRows: number
   invalidFieldStats: Record<string, number>
   outputPath?: string
+  outputFileName?: string
+  resultRows?: string[][]
   errorCode?:
     | 'FILE_NOT_FOUND'
     | 'MISSING_COLUMNS'
-    | 'OUTPUT_EXISTS'
     | 'PARSE_FAILED'
     | 'WRITE_FAILED'
     | 'UNKNOWN'

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import iconv from 'iconv-lite'
@@ -100,7 +100,7 @@ describe('csv-service integration', () => {
     expect(outputContent).toContain('2025-01-02,SA,5,50,15')
   })
 
-  it('aborts when output file already exists', async () => {
+  it('auto-increments output file name when target already exists', async () => {
     const dir = makeTempDir()
     dirs.push(dir)
 
@@ -110,8 +110,9 @@ describe('csv-service integration', () => {
     createCsv(dir, 'exist-统计.csv', 'dummy')
 
     const run = await runCsvAggregation(inputPath)
-    expect(run.success).toBe(false)
-    expect(run.errorCode).toBe('OUTPUT_EXISTS')
+    expect(run.success).toBe(true)
+    expect(run.outputPath).toContain('exist-统计(1).csv')
+    expect(existsSync(run.outputPath!)).toBe(true)
   })
 
   it('skips row when date/network invalid and counts field invalids', async () => {
@@ -171,5 +172,47 @@ describe('csv-service integration', () => {
     expect(lines[5]).toContain(',5G-2.6G,179.12,80')
     expect(lines[6]).toContain(',5G-700M,1.78,7')
     expect(lines[7]).toContain('总计,,359.8,172')
+  })
+
+  it('returns result rows for UI preview', async () => {
+    const dir = makeTempDir()
+    dirs.push(dir)
+
+    const header = REQUIRED_COLUMNS.join(',')
+    const rows = [
+      '2025-01-01 01:00:00,ci1,NSA,小区A,10,100,20,30,40,50,99.9,0.1,95,-110',
+      '2025-01-01 02:00:00,ci2,NSA,小区B,20,200,30,40,60,70,98.9,0.2,93,-108'
+    ]
+
+    const inputPath = createCsv(dir, 'preview.csv', `${header}\n${rows.join('\n')}`)
+    const run = await runCsvAggregation(inputPath)
+
+    expect(run.success).toBe(true)
+    expect(run.resultRows).toBeDefined()
+    expect(run.resultRows?.length).toBeGreaterThan(1)
+    expect(run.resultRows?.[0][0]).toBe('时间')
+    expect(run.outputFileName).toContain('preview-统计.csv')
+  })
+
+  it('writes styled xlsx when source is xlsx', async () => {
+    const dir = makeTempDir()
+    dirs.push(dir)
+
+    const header = REQUIRED_COLUMNS.join(',')
+    const rows = [
+      '2025-01-01 01:00:00,ci1,NSA,小区A,10,100,20,30,40,50,99.9,0.1,95,-110',
+      '2025-01-01 08:00:00,ci2,NSA,小区B,20,200,30,40,60,70,98.9,0.2,93,-108'
+    ]
+
+    const fakeXlsxPath = createCsv(dir, 'styled.xlsx', `${header}\n${rows.join('\n')}`)
+    const run = await runCsvAggregation(fakeXlsxPath, {
+      includeDailySubtotalRows: true,
+      includeGrandTotalRow: true,
+      blankDateForDetailRowsWhenSubtotalEnabled: true
+    })
+
+    expect(run.success).toBe(true)
+    expect(run.outputPath).toMatch(/styled-统计\.xlsx$/)
+    expect(existsSync(run.outputPath!)).toBe(true)
   })
 })
